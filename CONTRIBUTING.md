@@ -142,9 +142,9 @@ npm test
   of edit to its required check, and [`docs/tests.md`](docs/tests.md)
   catalogs what each suite covers. A single backend test file runs like
   `.venv\Scripts\python.exe -m unittest tests.backend.test_docs_sync -v`.
-- The Playwright smoke tests serve `ui/` through `python -m http.server`;
-  if `python` is not on your PATH, point the `PYTHON` environment variable
-  at an interpreter.
+- The Playwright browser tests serve `ui/` through a shared Node HTTP/1.1
+  server with persistent connections; no Python interpreter is needed for
+  these browser fixtures.
 - **Playwright is dev/CI-only.** Never add it to `requirements.txt`, launch
   scripts, or the Pinokio setup — runtime installs stay Python-only.
 

@@ -1,12 +1,9 @@
 const assert = require("node:assert/strict");
-const { spawn } = require("node:child_process");
 const http = require("node:http");
-const path = require("node:path");
 const { after, before, test } = require("node:test");
 const { character, pngCard } = require("./character_card_fixtures.cjs");
+const { startUiServer } = require("./ui_server.cjs");
 
-const ROOT = path.resolve(__dirname, "..", "..");
-const UI_DIR = path.join(ROOT, "ui");
 const START_PORT = Number(process.env.LLAMA_GUI_SMOKE_PORT || 5240);
 
 function loadPlaywright() {
@@ -42,45 +39,6 @@ async function findFreePort(startPort) {
         if (!(await isPortOpen(port))) return port;
     }
     throw new Error(`No free port found from ${startPort} to ${startPort + 19}`);
-}
-
-async function startStaticServer(port) {
-    const python = process.env.PYTHON || "python";
-    const server = spawn(python, ["-m", "http.server", String(port), "-d", UI_DIR], {
-        cwd: ROOT,
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true,
-    });
-
-    let stderr = "";
-    server.stderr.on("data", (chunk) => {
-        stderr += chunk.toString();
-    });
-
-    // A spawn failure (python not on PATH, for instance) emits 'error' on the
-    // ChildProcess. With no listener Node treats that as an unhandled error and
-    // crashes the runner with a bare trace instead of the diagnostic below.
-    let spawnError = null;
-    server.on("error", (error) => {
-        spawnError = error;
-    });
-
-    for (let i = 0; i < 40; i += 1) {
-        if (spawnError) {
-            throw new Error(
-                `Could not start the static server with "${python}": ${spawnError.message}`
-                + ` (set PYTHON to override)`
-            );
-        }
-        if (server.exitCode !== null) {
-            throw new Error(`Static server exited early (${server.exitCode}): ${stderr}`);
-        }
-        if (await isPortOpen(port)) return server;
-        await wait(100);
-    }
-
-    server.kill();
-    throw new Error(`Static server did not become ready on port ${port}`);
 }
 
 async function selectSection(page, section) {
@@ -4367,14 +4325,36 @@ let server;
 let port;
 before(async () => {
     port = await findFreePort(START_PORT);
-    server = await startStaticServer(port);
+    server = await startUiServer(port);
     browser = await loadPlaywright().chromium.launch({ headless: true });
 });
 after(async () => {
     try {
         if (browser) await browser.close();
     } finally {
-        if (server) server.kill();
+        if (server) await server.close();
+    }
+});
+
+test("static assets reuse a keep-alive connection", { timeout: 10000 }, async (t) => {
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+    t.after(() => agent.destroy());
+    for (const asset of ["/", "/js/monitor/monitor-dom.js?v=1", "/css/tokens.css?v=1"]) {
+        const result = await new Promise((resolve, reject) => {
+            const request = http.get({ hostname: "127.0.0.1", port, path: asset, agent }, response => {
+                response.resume();
+                response.on("error", reject);
+                response.on("end", () => resolve({
+                    status: response.statusCode,
+                    reusedSocket: request.reusedSocket,
+                }));
+            });
+            request.on("error", reject);
+        });
+        assert.equal(result.status, 200, `${asset} is served`);
+        if (asset !== "/") {
+            assert.equal(result.reusedSocket, true, `${asset} reuses the previous connection`);
+        }
     }
 });
 
