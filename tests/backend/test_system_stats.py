@@ -62,6 +62,7 @@ def make_counters(
     disk_write=500_000,
     disk_source="dev:8:0",
     memory=(4.0 * 1024 ** 3, 16.0 * 1024 ** 3),
+    memory_commit=None,
     disk_usage=(500.0 * 1024 ** 3, 1000.0 * 1024 ** 3),
 ):
     return {
@@ -69,6 +70,7 @@ def make_counters(
         "wall": wall,
         "cpu": {"source": "cpu:/proc/stat", "total": cpu_total, "idle": cpu_idle},
         "memory": memory,
+        "memory_commit": memory_commit,
         "disk": {
             "source": disk_source,
             "bytes_read": disk_read,
@@ -108,6 +110,28 @@ class DeltaMathTests(unittest.TestCase):
         self.assertTrue(disk["io_available"], "warmup differs from missing disk counters")
         # Capacity is not a rate: it is available on the very first sample.
         self.assertIsNotNone(disk["percent"])
+
+    def test_memory_commit_is_independent_of_physical_ram(self):
+        for physical in ((4 * 1024 ** 3, 16 * 1024 ** 3), None):
+            with self.subTest(physical=physical):
+                data, _ = self._sample(None, make_counters(
+                    memory=physical, memory_commit=(28 * 1024 ** 3, 128 * 1024 ** 3),
+                ))
+                memory = data["system"]["memory"]
+                self.assertEqual(memory["available"], physical is not None)
+                self.assertEqual(memory["committed_bytes"], 28 * 1024 ** 3)
+                self.assertEqual(memory["commit_limit_bytes"], 128 * 1024 ** 3)
+                self.assertEqual(memory["percent"], 25.0 if physical else None)
+
+    def test_missing_or_invalid_commit_preserves_physical_ram(self):
+        for commit in (None, (-1, 100), (10, 0), (101, 100), (float("nan"), 100)):
+            with self.subTest(commit=commit):
+                data, _ = self._sample(None, make_counters(memory_commit=commit))
+                memory = data["system"]["memory"]
+                self.assertTrue(memory["available"])
+                self.assertEqual(memory["percent"], 25.0)
+                self.assertIsNone(memory["committed_bytes"])
+                self.assertIsNone(memory["commit_limit_bytes"])
 
     def test_valid_interval_produces_rates(self):
         previous = {
@@ -357,6 +381,7 @@ class CollectorFailureTests(unittest.TestCase):
         ctx = make_context(platform="win32")
         with mock.patch.object(svc, "collect_windows_cpu", side_effect=OSError("boom")), \
                 mock.patch.object(svc, "collect_windows_memory", return_value=None), \
+                mock.patch.object(svc, "collect_windows_memory_commit", return_value=None), \
                 mock.patch.object(svc, "collect_windows_disk_counters", side_effect=OSError("no counters")), \
                 mock.patch("shutil.disk_usage", side_effect=OSError("no disk")):
             counters = svc.collect_system_counters(ctx, "win32")
@@ -372,6 +397,19 @@ class CollectorFailureTests(unittest.TestCase):
         self.assertFalse(data["system"]["cpu"]["available"])
         self.assertFalse(data["system"]["memory"]["available"])
         self.assertFalse(data["system"]["disk"]["available"])
+
+    def test_windows_commit_failure_is_logged_without_losing_ram(self):
+        ctx = make_context(platform="win32")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), \
+                mock.patch.object(svc, "collect_windows_cpu", return_value=None), \
+                mock.patch.object(svc, "collect_windows_memory", return_value=(1024, 2048)), \
+                mock.patch.object(svc, "collect_windows_memory_commit", side_effect=OSError("commit unavailable")), \
+                mock.patch.object(svc, "collect_windows_disk_counters", return_value=None):
+            counters = svc.collect_system_counters(ctx, "win32")
+        self.assertEqual(counters["memory"], (1024, 2048))
+        self.assertIsNone(counters["memory_commit"])
+        self.assertIn("memory_commit collector failed: OSError: commit unavailable", stderr.getvalue())
 
 
 class NativeDiskCountersTests(unittest.TestCase):

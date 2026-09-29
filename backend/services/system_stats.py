@@ -393,6 +393,41 @@ def collect_windows_memory():
     return (float(total - available), float(total))
 
 
+class _PERFORMANCE_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("cb", ctypes.c_uint32),
+        ("CommitTotal", ctypes.c_size_t),
+        ("CommitLimit", ctypes.c_size_t),
+        ("CommitPeak", ctypes.c_size_t),
+        ("PhysicalTotal", ctypes.c_size_t),
+        ("PhysicalAvailable", ctypes.c_size_t),
+        ("SystemCache", ctypes.c_size_t),
+        ("KernelTotal", ctypes.c_size_t),
+        ("KernelPaged", ctypes.c_size_t),
+        ("KernelNonpaged", ctypes.c_size_t),
+        ("PageSize", ctypes.c_size_t),
+        ("HandleCount", ctypes.c_uint32),
+        ("ProcessCount", ctypes.c_uint32),
+        ("ThreadCount", ctypes.c_uint32),
+    ]
+
+
+def collect_windows_memory_commit():
+    """System-wide ``(committed_bytes, limit_bytes)`` via ``GetPerformanceInfo``."""
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    get_info = psapi.GetPerformanceInfo
+    get_info.argtypes = [ctypes.POINTER(_PERFORMANCE_INFORMATION), ctypes.c_uint32]
+    get_info.restype = ctypes.c_int
+    info = _PERFORMANCE_INFORMATION()
+    info.cb = ctypes.sizeof(info)
+    if not get_info(ctypes.byref(info), info.cb):
+        return None
+    if info.PageSize <= 0 or info.CommitLimit <= 0 or info.CommitTotal > info.CommitLimit:
+        return None
+    return (int(info.CommitTotal) * int(info.PageSize),
+            int(info.CommitLimit) * int(info.PageSize))
+
+
 # --------------------------------------------------------------------------
 class _PDH_RAW_COUNTER(ctypes.Structure):
     _fields_ = [
@@ -663,6 +698,7 @@ def collect_system_counters(ctx, platform_name):
         "wall": time.time(),
         "cpu": None,
         "memory": None,
+        "memory_commit": None,
         "disk": None,
         "disk_usage": None,
     }
@@ -677,6 +713,7 @@ def collect_system_counters(ctx, platform_name):
         collectors = {
             "cpu": collect_windows_cpu,
             "memory": collect_windows_memory,
+            "memory_commit": collect_windows_memory_commit,
             "disk": collect_windows_disk_counters,
         }
     elif platform_name == "darwin":
@@ -1671,13 +1708,22 @@ def _build_cpu_metric(previous, current_cpu, interval_ok):
     return {"available": True, "percent": percent}
 
 
-def _build_memory_metric(current_memory):
+def _build_memory_metric(current_memory, current_commit=None):
+    commit_fields = {"committed_bytes": None, "commit_limit_bytes": None}
+    if current_commit is not None:
+        committed, limit = (finite_non_negative(value) for value in current_commit)
+        if committed is not None and limit is not None and limit > 0 and committed <= limit:
+            commit_fields = {
+                "committed_bytes": int(committed),
+                "commit_limit_bytes": int(limit),
+            }
     if current_memory is None:
         return {
             "available": False,
             "used_bytes": None,
             "total_bytes": None,
             "percent": None,
+            **commit_fields,
         }
     used, total = current_memory
     used = finite_non_negative(used)
@@ -1688,12 +1734,14 @@ def _build_memory_metric(current_memory):
             "used_bytes": None,
             "total_bytes": None,
             "percent": None,
+            **commit_fields,
         }
     return {
         "available": True,
         "used_bytes": int(used),
         "total_bytes": int(total),
         "percent": usage_percent(used, total),
+        **commit_fields,
     }
 
 
@@ -1848,7 +1896,7 @@ def collect_sample(ctx, previous, allow_probe_cache=True):
         "interval_seconds": interval_seconds if interval_ok else None,
         "system": {
             "cpu": _build_cpu_metric(previous, counters.get("cpu"), interval_ok),
-            "memory": _build_memory_metric(counters.get("memory")),
+            "memory": _build_memory_metric(counters.get("memory"), counters.get("memory_commit")),
             "disk": _build_disk_metric(previous, counters, interval_seconds, interval_ok),
         },
         "gpus": gpu_devices,

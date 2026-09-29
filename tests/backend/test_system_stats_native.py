@@ -8,6 +8,37 @@ from backend.services import system_stats as svc
 
 
 class WindowsCollectorTests(unittest.TestCase):
+    def memory_commit(self, committed, limit, page_size=4096, success=True):
+        def get_info(pointer, size):
+            expected_size = 104 if svc.ctypes.sizeof(svc.ctypes.c_size_t) == 8 else 56
+            self.assertEqual(size, expected_size, "Windows PERFORMANCE_INFORMATION ABI size")
+            self.assertEqual(pointer._obj.cb, size)
+            pointer._obj.CommitTotal = committed
+            pointer._obj.CommitLimit = limit
+            pointer._obj.PageSize = page_size
+            return success
+
+        psapi = SimpleNamespace(GetPerformanceInfo=get_info)
+        with mock.patch.object(svc.ctypes, "WinDLL", return_value=psapi, create=True) as dll:
+            result = svc.collect_windows_memory_commit()
+        dll.assert_called_once_with("psapi", use_last_error=True)
+        return result
+
+    def test_memory_commit_converts_system_pages_to_bytes(self):
+        for page_size in (4096, 16384):
+            with self.subTest(page_size=page_size):
+                self.assertEqual(self.memory_commit(7000000, 32000000, page_size),
+                                 (7000000 * page_size, 32000000 * page_size))
+        self.assertEqual(self.memory_commit(0, 100), (0, 100 * 4096))
+        if svc.ctypes.sizeof(svc.ctypes.c_size_t) == 8:
+            self.assertEqual(self.memory_commit(2 ** 32 + 3, 2 ** 33 + 7),
+                             ((2 ** 32 + 3) * 4096, (2 ** 33 + 7) * 4096))
+
+    def test_memory_commit_failed_and_invalid_samples_are_unavailable(self):
+        for values in ((10, 100, 4096, False), (0, 0), (101, 100), (10, 100, 0)):
+            with self.subTest(values=values):
+                self.assertIsNone(self.memory_commit(*values))
+
     def cpu(self, idle, kernel, user, success=True):
         def get_times(idle_ptr, kernel_ptr, user_ptr):
             for pointer, ticks in ((idle_ptr, idle), (kernel_ptr, kernel), (user_ptr, user)):

@@ -346,6 +346,7 @@ function createMonitorHarness() {
             mount(`monitor-${prefix}-sub`);
         }
         mount("monitor-disk-io");
+        mount("monitor-memory-commit").classList.add("hidden");
         mount("monitor-disk-activity");
         mount("monitor-disk-sub");
         mount("monitor-disk-read", "span");
