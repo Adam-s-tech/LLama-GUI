@@ -58,7 +58,7 @@ node tests/frontend/llama_flags_supported_unit.cjs --require-binaries
 
 An explicit `LLAMA_GUI_LLAMA_BIN_DIR` (or legacy `LLAMA_CPP_BIN_DIR`) requires both executables and disables fallback to other installations. Missing binaries, failed/timed-out `--help`, and unsupported flags fail the check. `--require-binaries` also requires an explicit directory. This checks advertised flag names, including negated booleans; it does not validate enum values or GPU execution. Fork-only flags are excluded.
 
-The Ubuntu/Python 3.13 CI job installs the `libgomp1` OpenMP runtime, downloads the exact CPU release in `tests/llama-cpp-pin.json`, verifies its SHA256, and sets the explicit directory before `npm test`. Update the tag, asset, and checksum together from an official llama.cpp release, then run compatibility before accepting the new pin. No model or GPU is needed.
+The Ubuntu and Windows/Python 3.13 CI jobs run `npm test`, including the unit and browser suites. The Ubuntu job also installs the `libgomp1` OpenMP runtime, downloads the exact CPU release in `tests/llama-cpp-pin.json`, verifies its SHA256, and sets the explicit directory for required binary compatibility. The Windows job uses the same optional binary check as the release workflow. Update the tag, asset, and checksum together from an official llama.cpp release, then run compatibility before accepting the new pin. No model or GPU is needed.
 
 ```powershell
 npm run test:frontend
@@ -66,7 +66,7 @@ npm run test:frontend
 
 Runs the Playwright smoke test for browser-level shared-state sync. This is also the only suite that can cover the Configure sampler preset panel, because `renderFlags()` destroys and rebuilds it — the `<select>` an assertion reads is a different element than the one that was clicked, which a `node:vm` harness cannot reproduce.
 
-The browser suite has named `node:test` scenarios with fresh browser contexts and API fixtures. Shared controls, authentication, inference, Chat streaming/recovery/compaction, samplers, external servers, custom launch arguments, backend activation, model switching, preset focus, model folders, and Monitor behavior run independently. A scenario failure does not prevent the remaining scenarios from running. To run one scenario:
+The browser suite has named `node:test` scenarios with fresh browser contexts and API fixtures. Shared controls, authentication, inference, Chat streaming/recovery/compaction, samplers, external servers, custom launch arguments, backend activation, model switching, preset focus, model folders, and Monitor behavior run independently. A scenario failure does not prevent the remaining scenarios from running. Smoke-test startup failures retain the original error as their cause and include captured page errors, or an explicit indication that none were captured. An injected Configure rendering failure verifies the startup-timeout diagnostic. To run one scenario:
 
 ```powershell
 node --test --test-name-pattern="benchmark actions" tests/frontend/flag_sync_smoke.cjs
