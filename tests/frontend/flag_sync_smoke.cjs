@@ -1662,13 +1662,14 @@ async function verifyBenchmarkActions(page) {
 async function runScenario(browser, port, verify) {
     const page = await browser.newPage();
     await page.addInitScript(() => { window.__LLAMA_GUI_TEST_HOOKS__ = true; });
+    const pageErrors = [];
+    const failedRequests = [];
     try {
         const chatCompletionBodies = [];
         const chatCompletionHeaders = [];
         const launchBodies = [];
         const metricsHeaders = [];
         const slotsHeaders = [];
-        const pageErrors = [];
         const lifecycleWarnings = [];
         page.on("console", message => {
             if (message.type() === "warning" && message.text().includes("Process lifecycle subscriber failed")) {
@@ -1769,6 +1770,13 @@ async function runScenario(browser, port, verify) {
 
         page.on("pageerror", (error) => {
             pageErrors.push(error.message || String(error));
+        });
+        page.on("requestfailed", request => {
+            const failure = request.failure()?.errorText || "unknown error";
+            // Reloads normally cancel requests belonging to the old document.
+            if (failure !== "net::ERR_ABORTED") {
+                failedRequests.push(`${request.method()} ${request.url()}: ${failure}`);
+            }
         });
         await page.route("**/api/**", async (route) => {
             const url = new URL(route.request().url());
@@ -2124,13 +2132,9 @@ async function runScenario(browser, port, verify) {
             });
         });
 
-        try {
-            await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: "domcontentloaded" });
-            await page.waitForFunction(() => window.LlamaGui?.flagCore && window.LlamaGui?.configFlagsUi);
-            await page.waitForSelector("#flag-ctx_size", { state: "attached" });
-        } catch (error) {
-            throw new Error(`${error.message}\nPage errors during startup:\n${pageErrors.join("\n") || "(none captured)"}`, { cause: error });
-        }
+        await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: "domcontentloaded" });
+        await page.waitForFunction(() => window.LlamaGui?.flagCore && window.LlamaGui?.configFlagsUi);
+        await page.waitForSelector("#flag-ctx_size", { state: "attached" });
         assert.deepEqual(lifecycleWarnings, [], "initial lifecycle rendering must have configured dependencies");
 
         if (typeof verify === "function") {
@@ -3678,7 +3682,7 @@ async function runScenario(browser, port, verify) {
                 await page.reload({ waitUntil: "domcontentloaded" });
                 await page.waitForFunction(() => window.LlamaGui?.flagCore && window.LlamaGui?.monitorUi);
                 await page.waitForFunction(() => typeof inferenceStats !== "undefined"
-                    && inferenceStats.getTargetKey() === "ext:0:127.0.0.1:9002");
+                    && inferenceStats.getTargetKey());
                 assert.equal(await page.evaluate(() => inferenceStats.getTargetKey()), "ext:0:127.0.0.1:9002",
                     "an already-active target must not mint a new external revision");
                 assert.equal(
@@ -4350,6 +4354,9 @@ async function runScenario(browser, port, verify) {
         await scenarios[verify]();
 
         assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+    } catch (error) {
+        throw new Error(`${error.message}\nPage errors:\n${pageErrors.join("\n") || "(none captured)"}`
+            + `\nFailed requests:\n${failedRequests.join("\n") || "(none captured)"}`, { cause: error });
     } finally {
         await page.close();
     }
@@ -4510,31 +4517,42 @@ async function verifyOfficialBackendDiscovery(page) {
     assert.deepEqual(writes, [], "discovery never installs or switches toolkits");
 }
 
-test("startup timeouts report page errors", { timeout: 45000 }, async () => {
-    const failingBrowser = {
-        async newPage() {
-            const page = await browser.newPage();
-            page.setDefaultTimeout(5000);
-            await page.addInitScript(() => {
-                document.addEventListener("DOMContentLoaded", () => {
-                    window.LlamaGui.configFlagsUi.renderFlags = () => {
-                        throw new Error("Injected Configure startup failure");
-                    };
-                }, { once: true });
-            });
-            return page;
-        },
-    };
-    await assert.rejects(
-        runScenario(failingBrowser, port, () => assert.fail("scenario must not run after failed startup")),
-        error => {
-            assert.equal(error.cause?.name, "TimeoutError");
-            assert.match(error.message, /#flag-ctx_size/);
-            assert.match(error.message, /Page errors during startup:\nInjected Configure startup failure/);
-            return true;
-        },
-    );
-});
+for (const phase of ["startup", "reload"]) {
+    test(`${phase} timeouts report page errors`, { timeout: 45000 }, async () => {
+        const failStartup = () => {
+            document.addEventListener("DOMContentLoaded", () => {
+                window.LlamaGui.configFlagsUi.renderFlags = () => {
+                    throw new Error("Injected Configure startup failure");
+                };
+            }, { once: true });
+        };
+        const failingBrowser = {
+            async newPage() {
+                const page = await browser.newPage();
+                page.setDefaultTimeout(5000);
+                await page.route("**/css/tokens.css*", route => route.abort("connectionreset"));
+                if (phase === "startup") await page.addInitScript(failStartup);
+                return page;
+            },
+        };
+        await assert.rejects(
+            runScenario(failingBrowser, port, async page => {
+                assert.equal(phase, "reload", "scenario must not run after failed startup");
+                await page.addInitScript(failStartup);
+                await page.reload({ waitUntil: "domcontentloaded" });
+                await page.waitForSelector("#flag-ctx_size", { state: "attached" });
+                assert.fail("reload must not finish after failed startup");
+            }),
+            error => {
+                assert.equal(error.cause?.name, "TimeoutError");
+                assert.match(error.message, /#flag-ctx_size/);
+                assert.match(error.message, /Page errors:\nInjected Configure startup failure/);
+                assert.match(error.message, /Failed requests:\nGET .*\/css\/tokens\.css.*: net::ERR_CONNECTION_RESET/);
+                return true;
+            },
+        );
+    });
+}
 
 for (const [name, verify = name] of [
     ["preset imports and safe notifications"],
