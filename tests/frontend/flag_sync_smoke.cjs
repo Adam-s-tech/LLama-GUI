@@ -2124,9 +2124,13 @@ async function runScenario(browser, port, verify) {
             });
         });
 
-        await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: "domcontentloaded" });
-        await page.waitForFunction(() => window.LlamaGui?.flagCore && window.LlamaGui?.configFlagsUi);
-        await page.waitForSelector("#flag-ctx_size", { state: "attached" });
+        try {
+            await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: "domcontentloaded" });
+            await page.waitForFunction(() => window.LlamaGui?.flagCore && window.LlamaGui?.configFlagsUi);
+            await page.waitForSelector("#flag-ctx_size", { state: "attached" });
+        } catch (error) {
+            throw new Error(`${error.message}\nPage errors during startup:\n${pageErrors.join("\n") || "(none captured)"}`, { cause: error });
+        }
         assert.deepEqual(lifecycleWarnings, [], "initial lifecycle rendering must have configured dependencies");
 
         if (typeof verify === "function") {
@@ -4505,6 +4509,32 @@ async function verifyOfficialBackendDiscovery(page) {
     assert.match(await page.textContent("#installed-backend-summary"), /CPU/);
     assert.deepEqual(writes, [], "discovery never installs or switches toolkits");
 }
+
+test("startup timeouts report page errors", { timeout: 45000 }, async () => {
+    const failingBrowser = {
+        async newPage() {
+            const page = await browser.newPage();
+            page.setDefaultTimeout(5000);
+            await page.addInitScript(() => {
+                document.addEventListener("DOMContentLoaded", () => {
+                    window.LlamaGui.configFlagsUi.renderFlags = () => {
+                        throw new Error("Injected Configure startup failure");
+                    };
+                }, { once: true });
+            });
+            return page;
+        },
+    };
+    await assert.rejects(
+        runScenario(failingBrowser, port, () => assert.fail("scenario must not run after failed startup")),
+        error => {
+            assert.equal(error.cause?.name, "TimeoutError");
+            assert.match(error.message, /#flag-ctx_size/);
+            assert.match(error.message, /Page errors during startup:\nInjected Configure startup failure/);
+            return true;
+        },
+    );
+});
 
 for (const [name, verify = name] of [
     ["preset imports and safe notifications"],

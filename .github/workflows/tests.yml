@@ -50,18 +50,18 @@ jobs:
         run: python -m unittest discover tests -v
 
       - name: Set up Node for frontend smoke test
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        if: matrix.python-version == '3.13'
         uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
 
       - name: Install frontend test dependencies
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        if: matrix.python-version == '3.13'
         run: npm ci
 
       - name: Install Playwright Chromium
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        if: matrix.python-version == '3.13'
         run: npx playwright install chromium
 
       - name: Prepare pinned llama.cpp CPU binaries
@@ -99,6 +99,6 @@ jobs:
           print(f'Prepared llama.cpp {pin["tag"]}: {pin["asset"]}')
           PY
 
-      - name: Run frontend tests with required flag compatibility
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+      - name: Run frontend tests
+        if: matrix.python-version == '3.13'
         run: npm test
