@@ -1,12 +1,9 @@
 const assert = require("node:assert/strict");
-const { spawn } = require("node:child_process");
 const http = require("node:http");
-const path = require("node:path");
 const { after, before, test } = require("node:test");
 const { character, pngCard } = require("./character_card_fixtures.cjs");
+const { startUiServer } = require("./ui_server.cjs");
 
-const ROOT = path.resolve(__dirname, "..", "..");
-const UI_DIR = path.join(ROOT, "ui");
 const START_PORT = Number(process.env.LLAMA_GUI_SMOKE_PORT || 5240);
 
 function loadPlaywright() {
@@ -42,45 +39,6 @@ async function findFreePort(startPort) {
         if (!(await isPortOpen(port))) return port;
     }
     throw new Error(`No free port found from ${startPort} to ${startPort + 19}`);
-}
-
-async function startStaticServer(port) {
-    const python = process.env.PYTHON || "python";
-    const server = spawn(python, ["-m", "http.server", String(port), "-d", UI_DIR], {
-        cwd: ROOT,
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true,
-    });
-
-    let stderr = "";
-    server.stderr.on("data", (chunk) => {
-        stderr += chunk.toString();
-    });
-
-    // A spawn failure (python not on PATH, for instance) emits 'error' on the
-    // ChildProcess. With no listener Node treats that as an unhandled error and
-    // crashes the runner with a bare trace instead of the diagnostic below.
-    let spawnError = null;
-    server.on("error", (error) => {
-        spawnError = error;
-    });
-
-    for (let i = 0; i < 40; i += 1) {
-        if (spawnError) {
-            throw new Error(
-                `Could not start the static server with "${python}": ${spawnError.message}`
-                + ` (set PYTHON to override)`
-            );
-        }
-        if (server.exitCode !== null) {
-            throw new Error(`Static server exited early (${server.exitCode}): ${stderr}`);
-        }
-        if (await isPortOpen(port)) return server;
-        await wait(100);
-    }
-
-    server.kill();
-    throw new Error(`Static server did not become ready on port ${port}`);
 }
 
 async function selectSection(page, section) {
@@ -1662,13 +1620,14 @@ async function verifyBenchmarkActions(page) {
 async function runScenario(browser, port, verify) {
     const page = await browser.newPage();
     await page.addInitScript(() => { window.__LLAMA_GUI_TEST_HOOKS__ = true; });
+    const pageErrors = [];
+    const failedRequests = [];
     try {
         const chatCompletionBodies = [];
         const chatCompletionHeaders = [];
         const launchBodies = [];
         const metricsHeaders = [];
         const slotsHeaders = [];
-        const pageErrors = [];
         const lifecycleWarnings = [];
         page.on("console", message => {
             if (message.type() === "warning" && message.text().includes("Process lifecycle subscriber failed")) {
@@ -1769,6 +1728,13 @@ async function runScenario(browser, port, verify) {
 
         page.on("pageerror", (error) => {
             pageErrors.push(error.message || String(error));
+        });
+        page.on("requestfailed", request => {
+            const failure = request.failure()?.errorText || "unknown error";
+            // Reloads normally cancel requests belonging to the old document.
+            if (failure !== "net::ERR_ABORTED") {
+                failedRequests.push(`${request.method()} ${request.url()}: ${failure}`);
+            }
         });
         await page.route("**/api/**", async (route) => {
             const url = new URL(route.request().url());
@@ -2124,13 +2090,9 @@ async function runScenario(browser, port, verify) {
             });
         });
 
-        try {
-            await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: "domcontentloaded" });
-            await page.waitForFunction(() => window.LlamaGui?.flagCore && window.LlamaGui?.configFlagsUi);
-            await page.waitForSelector("#flag-ctx_size", { state: "attached" });
-        } catch (error) {
-            throw new Error(`${error.message}\nPage errors during startup:\n${pageErrors.join("\n") || "(none captured)"}`, { cause: error });
-        }
+        await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: "domcontentloaded" });
+        await page.waitForFunction(() => window.LlamaGui?.flagCore && window.LlamaGui?.configFlagsUi);
+        await page.waitForSelector("#flag-ctx_size", { state: "attached" });
         assert.deepEqual(lifecycleWarnings, [], "initial lifecycle rendering must have configured dependencies");
 
         if (typeof verify === "function") {
@@ -3678,7 +3640,7 @@ async function runScenario(browser, port, verify) {
                 await page.reload({ waitUntil: "domcontentloaded" });
                 await page.waitForFunction(() => window.LlamaGui?.flagCore && window.LlamaGui?.monitorUi);
                 await page.waitForFunction(() => typeof inferenceStats !== "undefined"
-                    && inferenceStats.getTargetKey() === "ext:0:127.0.0.1:9002");
+                    && inferenceStats.getTargetKey());
                 assert.equal(await page.evaluate(() => inferenceStats.getTargetKey()), "ext:0:127.0.0.1:9002",
                     "an already-active target must not mint a new external revision");
                 assert.equal(
@@ -4350,6 +4312,9 @@ async function runScenario(browser, port, verify) {
         await scenarios[verify]();
 
         assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
+    } catch (error) {
+        throw new Error(`${error.message}\nPage errors:\n${pageErrors.join("\n") || "(none captured)"}`
+            + `\nFailed requests:\n${failedRequests.join("\n") || "(none captured)"}`, { cause: error });
     } finally {
         await page.close();
     }
@@ -4360,14 +4325,36 @@ let server;
 let port;
 before(async () => {
     port = await findFreePort(START_PORT);
-    server = await startStaticServer(port);
+    server = await startUiServer(port);
     browser = await loadPlaywright().chromium.launch({ headless: true });
 });
 after(async () => {
     try {
         if (browser) await browser.close();
     } finally {
-        if (server) server.kill();
+        if (server) await server.close();
+    }
+});
+
+test("static assets reuse a keep-alive connection", { timeout: 10000 }, async (t) => {
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+    t.after(() => agent.destroy());
+    for (const asset of ["/", "/js/monitor/monitor-dom.js?v=1", "/css/tokens.css?v=1"]) {
+        const result = await new Promise((resolve, reject) => {
+            const request = http.get({ hostname: "127.0.0.1", port, path: asset, agent }, response => {
+                response.resume();
+                response.on("error", reject);
+                response.on("end", () => resolve({
+                    status: response.statusCode,
+                    reusedSocket: request.reusedSocket,
+                }));
+            });
+            request.on("error", reject);
+        });
+        assert.equal(result.status, 200, `${asset} is served`);
+        if (asset !== "/") {
+            assert.equal(result.reusedSocket, true, `${asset} reuses the previous connection`);
+        }
     }
 });
 
@@ -4510,31 +4497,42 @@ async function verifyOfficialBackendDiscovery(page) {
     assert.deepEqual(writes, [], "discovery never installs or switches toolkits");
 }
 
-test("startup timeouts report page errors", { timeout: 45000 }, async () => {
-    const failingBrowser = {
-        async newPage() {
-            const page = await browser.newPage();
-            page.setDefaultTimeout(5000);
-            await page.addInitScript(() => {
-                document.addEventListener("DOMContentLoaded", () => {
-                    window.LlamaGui.configFlagsUi.renderFlags = () => {
-                        throw new Error("Injected Configure startup failure");
-                    };
-                }, { once: true });
-            });
-            return page;
-        },
-    };
-    await assert.rejects(
-        runScenario(failingBrowser, port, () => assert.fail("scenario must not run after failed startup")),
-        error => {
-            assert.equal(error.cause?.name, "TimeoutError");
-            assert.match(error.message, /#flag-ctx_size/);
-            assert.match(error.message, /Page errors during startup:\nInjected Configure startup failure/);
-            return true;
-        },
-    );
-});
+for (const phase of ["startup", "reload"]) {
+    test(`${phase} timeouts report page errors`, { timeout: 45000 }, async () => {
+        const failStartup = () => {
+            document.addEventListener("DOMContentLoaded", () => {
+                window.LlamaGui.configFlagsUi.renderFlags = () => {
+                    throw new Error("Injected Configure startup failure");
+                };
+            }, { once: true });
+        };
+        const failingBrowser = {
+            async newPage() {
+                const page = await browser.newPage();
+                page.setDefaultTimeout(5000);
+                await page.route("**/css/tokens.css*", route => route.abort("connectionreset"));
+                if (phase === "startup") await page.addInitScript(failStartup);
+                return page;
+            },
+        };
+        await assert.rejects(
+            runScenario(failingBrowser, port, async page => {
+                assert.equal(phase, "reload", "scenario must not run after failed startup");
+                await page.addInitScript(failStartup);
+                await page.reload({ waitUntil: "domcontentloaded" });
+                await page.waitForSelector("#flag-ctx_size", { state: "attached" });
+                assert.fail("reload must not finish after failed startup");
+            }),
+            error => {
+                assert.equal(error.cause?.name, "TimeoutError");
+                assert.match(error.message, /#flag-ctx_size/);
+                assert.match(error.message, /Page errors:\nInjected Configure startup failure/);
+                assert.match(error.message, /Failed requests:\nGET .*\/css\/tokens\.css.*: net::ERR_CONNECTION_RESET/);
+                return true;
+            },
+        );
+    });
+}
 
 for (const [name, verify = name] of [
     ["preset imports and safe notifications"],
