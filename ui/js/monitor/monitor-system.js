@@ -55,6 +55,16 @@
                 ? `${I.dom.formatBytes(memUsed)} used of ${I.dom.formatBytes(memTotal)}`
                 : memory.available === true ? "Waiting for first sample" : "");
 
+        const committed = I.dom.finiteNonNegativeOrNull(memory.committed_bytes);
+        const commitLimit = I.dom.finiteNonNegativeOrNull(memory.commit_limit_bytes);
+        const hasCommit = committed !== null && commitLimit !== null
+            && commitLimit > 0 && committed <= commitLimit;
+        const commitEl = I.dom.byId("monitor-memory-commit");
+        I.dom.setText(commitEl, hasCommit
+            ? `Committed: ${I.dom.formatBytes(committed)} / ${I.dom.formatBytes(commitLimit)}`
+            : "");
+        if (commitEl) commitEl.classList.toggle("hidden", !hasCommit);
+
         const readRate = I.dom.finiteNonNegativeOrNull(disk.read_bytes_per_second);
         const writeRate = I.dom.finiteNonNegativeOrNull(disk.write_bytes_per_second);
         const hasRates = readRate !== null || writeRate !== null;

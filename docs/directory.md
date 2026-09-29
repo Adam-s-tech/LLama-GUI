@@ -751,6 +751,19 @@ Frontend downloader controls, status rendering, progress polling, cancel handlin
 
 ---
 
+## Monitor Memory
+
+The Memory card's percentage, bar, and used/total reading measure physical RAM.
+On Windows, a second line shows system-wide committed memory and its current
+commit limit, matching Task Manager's Committed reading. The backend reads
+`CommitTotal` and `CommitLimit` through
+[`GetPerformanceInfo`](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-getperformanceinfo)
+and multiplies each by `PageSize`. The `/api/system-stats` memory object includes
+optional `committed_bytes` and `commit_limit_bytes` fields; they are null on other
+platforms or when the independent commit collector is unavailable. The frontend
+hides that line when readings are unavailable, while physical RAM keeps its own
+availability state.
+
 ## Monitor Disk Activity
 
 The `system:disk` card shows read/write throughput instead of capacity, preserving its layout and visibility preference. The `/api/system-stats` disk object retains capacity fields for compatibility and adds `io_available` (counter availability, independent of capacity) and `io_label` (the measured scope). Rates stay null during warmup, long sampling gaps, counter rollback, or a source change; a valid zero is Idle.

@@ -1733,7 +1733,10 @@ async function runScenario(browser, port, verify) {
             interval_seconds: 2.0,
             system: {
                 cpu: { available: true, percent: 18.4 },
-                memory: { available: true, used_bytes: 12884901888, total_bytes: 34359738368, percent: 37.5 },
+                memory: {
+                    available: true, used_bytes: 12884901888, total_bytes: 34359738368, percent: 37.5,
+                    committed_bytes: 28 * 1024 ** 3, commit_limit_bytes: 128 * 1024 ** 3,
+                },
                 disk: {
                     available: true,
                     path_label: "Application disk",
@@ -4214,6 +4217,8 @@ async function runScenario(browser, port, verify) {
                 // System/GPU cards render from the mocked endpoint while visible.
                 await page.waitForFunction(() => document.getElementById("monitor-cpu-value")?.textContent === "18.4%");
                 assert.equal(await page.textContent("#monitor-memory-value"), "37.5%");
+                assert.equal(await page.textContent("#monitor-memory-commit"), "Committed: 28.0 GB / 128 GB");
+                assert.equal(await page.locator("#monitor-memory-commit").isVisible(), true);
                 assert.equal(await page.textContent("#monitor-disk-read"), "1.2 MB/s");
                 assert.equal(await page.textContent("#monitor-disk-write"), "410 KB/s");
                 assert.equal(await page.textContent("#monitor-disk-activity"), "Reading and writing");

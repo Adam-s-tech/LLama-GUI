@@ -111,6 +111,44 @@ test("CPU warmup", async (t) => {
 
 });
 
+test("committed memory updates independently and hides missing or invalid readings", async (t) => {
+    const fixture = createMonitorHarness();
+    t.after(fixture.dispose);
+    const { monitorUi, documentStub, makeSample, wait } = fixture;
+    const commitEl = documentStub.getElementById("monitor-memory-commit");
+    for (const [commit, expected] of [
+        [{ committed_bytes: 28 * 1024 ** 3, commit_limit_bytes: 128 * 1024 ** 3 }, "Committed: 28.0 GB / 128 GB"],
+        [{ committed_bytes: 0, commit_limit_bytes: 128 * 1024 ** 3 }, "Committed: 0 B / 128 GB"],
+        [{ committed_bytes: null, commit_limit_bytes: null }, ""],
+        [{ committed_bytes: 1 }, ""],
+        [{}, ""],
+        [{ committed_bytes: -1, commit_limit_bytes: 100 }, ""],
+        [{ committed_bytes: 101, commit_limit_bytes: 100 }, ""],
+        [{ committed_bytes: 1, commit_limit_bytes: 0 }, ""],
+        [{ committed_bytes: "bad", commit_limit_bytes: 100 }, ""],
+        [{ committed_bytes: 32 * 1024 ** 3, commit_limit_bytes: 128 * 1024 ** 3 }, "Committed: 32.0 GB / 128 GB"],
+    ]) {
+        monitorUi.configure({ fetchJson: async () => makeSample({ system: { memory: {
+            available: true, used_bytes: 12 * 1024 ** 3, total_bytes: 32 * 1024 ** 3,
+            percent: 37.5, ...commit,
+        } } }) });
+        monitorUi.recheck();
+        await wait(80);
+        assert.equal(commitEl.textContent, expected);
+        assert.equal(commitEl.classList.contains("hidden"), expected === "");
+        assert.equal(documentStub.getElementById("monitor-memory-value").textContent, "37.5%");
+        assert.equal(documentStub.getElementById("monitor-memory-sub").textContent, "12.0 GB used of 32.0 GB");
+    }
+    monitorUi.configure({ fetchJson: async () => makeSample({ system: { memory: {
+        available: false, committed_bytes: 28 * 1024 ** 3, commit_limit_bytes: 128 * 1024 ** 3,
+    } } }) });
+    monitorUi.recheck();
+    await wait(80);
+    assert.equal(commitEl.textContent, "Committed: 28.0 GB / 128 GB");
+    assert.equal(commitEl.classList.contains("hidden"), false);
+    assert.equal(documentStub.getElementById("monitor-memory-value").textContent, "Not available");
+});
+
 test("partial readings", async (t) => {
     const fixture = createMonitorHarness();
     t.after(fixture.dispose);
