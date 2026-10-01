@@ -16,6 +16,9 @@ from tests.backend.test_services import make_service_context
 
 class CustomSlotsTests(unittest.TestCase):
     def setUp(self):
+        opt_out = mock.patch.dict(os.environ, {"LLAMA_GUI_SKIP_LDD": ""})
+        opt_out.start()
+        self.addCleanup(opt_out.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.ctx = make_service_context(self.tmp.name)
@@ -123,6 +126,90 @@ class CustomSlotsTests(unittest.TestCase):
         self.assertEqual(env["PATH"], str(directory) + os.pathsep + "system-path")
         self.assertEqual(env["LD_LIBRARY_PATH"], str(directory) + os.pathsep + "system-libs")
         self.assertEqual(process_manager._fit_params_executable(self.ctx), directory / "llama-fit-params")
+
+    def test_linux_ldd_opt_out_allows_status_activation_preflight_and_launch(self):
+        self.ctx.services.current_platform = "linux"
+        self.ctx.services.binary_suffix = ""
+        self.ctx.services.normalize_llama_api_target = lambda host, port: {"host": host, "port": int(port)}
+        model = self.ctx.paths.root / "model.gguf"
+        model.write_text("model")
+        for backend in ("cpu", "custom", "custom-02"):
+            with self.subTest(backend=backend):
+                directory = self.write_build(backend)
+                (directory / "libggml-vulkan.so").write_text("plugin")
+                self.ctx.services.save_config({"backend": backend, "tag": "b123"})
+                fake_process = mock.Mock(pid=1234)
+                fake_process.poll.return_value = None
+                with mock.patch.dict(os.environ, {"LLAMA_GUI_SKIP_LDD": "1"}), mock.patch.object(
+                    llama_manager.os, "access", return_value=True
+                ), mock.patch.object(llama_manager.subprocess, "run") as probe, mock.patch.object(
+                    process_manager.subprocess, "Popen", return_value=fake_process
+                ) as popen, mock.patch.object(process_manager.threading, "Thread"):
+                    if backend != "cpu":
+                        activated = self.activate(backend)
+                        self.assertTrue(activated.payload["ok"])
+                        self.assertFalse(activated.payload["runtime_health"]["checked"])
+                        self.assertEqual(activated.payload["runtime_health"]["skip_reason"], "LLAMA_GUI_SKIP_LDD")
+                    response = DummyResponse()
+                    status.get_status(Request("GET", "/api/status", "", {}), response, self.ctx)
+                    self.assertTrue(response.payload["installed"])
+                    self.assertFalse(response.payload["config_stale"])
+                    self.assertFalse(response.payload["runtime_health"]["checked"])
+                    args = ["-m", str(model)]
+                    preflight = process_manager.preflight_launch(self.ctx, "llama-server", args, {})
+                    self.assertTrue(preflight["ok"])
+                    result = process_manager.launch_process(self.ctx, "llama-server", args)
+                    self.assertEqual(result["pid"], 1234)
+                    self.assertEqual(popen.call_args.args[0], [str(directory / "llama-server"), *args])
+                    probe.assert_not_called()
+                fake_process.poll.return_value = 0
+
+    def test_linux_ldd_opt_out_keeps_missing_tool_and_permission_guards(self):
+        self.ctx.services.current_platform = "linux"
+        self.ctx.services.binary_suffix = ""
+        for backend in ("cpu", "custom", "custom-02"):
+            with self.subTest(backend=backend), mock.patch.dict(
+                os.environ, {"LLAMA_GUI_SKIP_LDD": "1"}
+            ), mock.patch.object(llama_manager.subprocess, "run") as probe, mock.patch.object(
+                process_manager.subprocess, "Popen"
+            ) as popen:
+                directory = self.write_build(backend)
+                self.ctx.services.save_config({"backend": backend, "tag": "b123"})
+                executable = directory / "llama-server"
+                executable.unlink()
+                result = process_manager.preflight_launch(self.ctx, "llama-server", [], {})
+                self.assertIn("not found", result["error"])
+                self.assertIn("not found", process_manager.launch_process(self.ctx, "llama-server", [])["error"])
+                if backend != "cpu":
+                    self.assertEqual(self.activate(backend).payload["missing_required"], ["llama-server"])
+                response = DummyResponse()
+                status.get_status(Request("GET", "/api/status", "", {}), response, self.ctx)
+                self.assertFalse(response.payload["installed"])
+                executable.write_text("binary")
+                with mock.patch.object(llama_manager.os, "access", return_value=False):
+                    result = process_manager.preflight_launch(self.ctx, "llama-server", [], {})
+                    self.assertIn("not executable", result["error"])
+                    self.assertIn("not executable", process_manager.launch_process(self.ctx, "llama-server", [])["error"])
+                    if backend != "cpu":
+                        self.assertEqual(len(self.activate(backend).payload["not_executable"]), 2)
+                probe.assert_not_called()
+                popen.assert_not_called()
+
+    def test_linux_ldd_opt_out_preserves_subprocess_launch_errors(self):
+        self.ctx.services.current_platform = "linux"
+        self.ctx.services.binary_suffix = ""
+        self.ctx.services.normalize_llama_api_target = lambda host, port: {"host": host, "port": int(port)}
+        self.write_build("cpu")
+        with mock.patch.dict(os.environ, {"LLAMA_GUI_SKIP_LDD": "1"}), mock.patch.object(
+            llama_manager.os, "access", return_value=True
+        ), mock.patch.object(llama_manager.subprocess, "run") as probe, mock.patch.object(
+            process_manager.subprocess, "Popen", side_effect=OSError("runtime loader failed")
+        ) as popen:
+            result = process_manager.launch_process(self.ctx, "llama-server", [])
+        self.assertEqual(result["error"], "runtime loader failed")
+        self.assertIsNone(self.ctx.state.process)
+        popen.assert_called_once()
+        probe.assert_not_called()
 
     def test_macos_missing_runtime_and_permissions_leave_original_active(self):
         self.ctx.services.current_platform = "darwin"

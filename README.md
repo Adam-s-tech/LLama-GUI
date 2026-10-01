@@ -124,6 +124,14 @@ To recreate Linux/macOS launchers without reinstalling, run from the checkout:
 
 Linux respects `XDG_DATA_HOME` and uses `xdg-user-dir DESKTOP` when available; otherwise it uses an existing `~/Desktop`. Disabled or missing desktops are skipped. These launchers start the server in the background and open your browser. Keep the checkout in place, or rerun the helper from its new location after moving it. If shortcut creation fails, installation still completes and the terminal launch scripts remain available.
 
+On Linux, including NixOS, if your llama.cpp binaries run manually but the GUI reports missing runtime libraries, close the GUI and start it from the checkout with:
+
+```bash
+LLAMA_GUI_SKIP_LDD=1 ./mac_linux_start.sh
+```
+
+This opts out of the GUI's `ldd` checks, including custom-backend activation. It does not install missing libraries or bypass executable checks. Restart without the variable to restore library validation.
+
 To build CUDA `llama.cpp` yourself on Linux, see `Linux_compile_toolkit/`.
 
 ## Install With Pinokio

@@ -45,6 +45,18 @@ vulkaninfo --summary   # Vulkan
 rocminfo               # ROCm / AMD kernel-driver access
 ```
 
+If the binaries run manually but `ldd` reports missing libraries (for example on
+NixOS), close the GUI and start it from the checkout with the Linux-only opt-out:
+
+```bash
+LLAMA_GUI_SKIP_LDD=1 ./mac_linux_start.sh
+```
+
+This skips the GUI's executable and ggml-plugin dependency probes for status,
+custom-backend activation, preflight, and launch. Missing executables, permissions,
+and actual runtime failures still apply; it does not supply missing libraries.
+Restart without the variable to restore the checks.
+
 Lemonade ROCm archives include user-space ROCm libraries, but the selected `gfx` target must match the GPU and the host still needs working AMD kernel-driver access. If model loading runs unusually long, the app keeps the process stoppable and adds a persistent warning directing you to the live process output.
 
 ## Antivirus / Defender quarantine
