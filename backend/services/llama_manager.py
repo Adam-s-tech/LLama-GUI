@@ -18,6 +18,7 @@ import urllib.request
 import zipfile
 from typing import Any, Callable, Iterable, Mapping, Optional
 
+from ..config import parse_bool_env
 from ..context import AppContext
 from ..http import sanitize_error
 from . import official_backends
@@ -423,12 +424,28 @@ def get_linux_runtime_probe_files(runtime_dir: pathlib.Path) -> list[pathlib.Pat
     )
 
 
+def _linux_runtime_validation_opt_out(current_platform: str) -> Optional[dict[str, Any]]:
+    """Allow Linux users to bypass ldd when it misreports a working runtime."""
+    if current_platform.startswith("linux") and parse_bool_env(os.environ.get("LLAMA_GUI_SKIP_LDD")):
+        return {
+            "ok": True,
+            "checked": False,
+            "skip_reason": "LLAMA_GUI_SKIP_LDD",
+            "required_runtime_files": [],
+            "missing_runtime_files": [],
+        }
+    return None
+
+
 def validate_runtime_dependencies(
     ctx: AppContext, tools: Optional[Iterable[str]] = None
 ) -> dict[str, Any]:
     current_platform = ctx.services.current_platform or sys.platform
     if current_platform == "unknown":
         current_platform = sys.platform
+    skipped = _linux_runtime_validation_opt_out(current_platform)
+    if skipped is not None:
+        return skipped
     if current_platform != "darwin" and not current_platform.startswith("linux"):
         return {
             "ok": True,
@@ -702,6 +719,9 @@ def _validate_custom_runtime_dependencies(
     current_platform = ctx.services.current_platform or sys.platform
     if current_platform == "unknown":
         current_platform = sys.platform
+    skipped = _linux_runtime_validation_opt_out(current_platform)
+    if skipped is not None:
+        return skipped
     if current_platform != "darwin" and not current_platform.startswith("linux"):
         return {
             "ok": True,

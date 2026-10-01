@@ -959,6 +959,11 @@ class Sha256FileTests(unittest.TestCase):
 
 
 class RuntimeDependencyValidationTests(unittest.TestCase):
+    def setUp(self):
+        opt_out = mock.patch.dict(os.environ, {"LLAMA_GUI_SKIP_LDD": ""})
+        opt_out.start()
+        self.addCleanup(opt_out.stop)
+
     def make_runtime_context(self, tmpdir, platform_name="darwin"):
         from backend.context import AppContext, AppPaths, BackendServices
 
@@ -1138,6 +1143,77 @@ class RuntimeDependencyValidationTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["checked"])
         self.assertEqual(result["unchecked_tools"], ["llama-server"])
+
+    def test_linux_ldd_opt_out_skips_tools_and_plugins_without_caching(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self.make_runtime_context(tmp, "linux")
+            for name in ("llama-cli", "llama-server", "libggml-vulkan.so"):
+                (ctx.paths.llama_bin / name).write_text("binary")
+            for value in ("1", "true", "yes", "on"):
+                with self.subTest(value=value), mock.patch.dict(
+                    os.environ, {"LLAMA_GUI_SKIP_LDD": value}
+                ), mock.patch.object(llama_manager.subprocess, "run") as probe:
+                    result = llama_manager.validate_runtime_dependencies(ctx)
+                    self.assertTrue(result["ok"])
+                    self.assertFalse(result["checked"])
+                    self.assertEqual(result["skip_reason"], "LLAMA_GUI_SKIP_LDD")
+                    self.assertEqual(result["required_runtime_files"], [])
+                    self.assertEqual(result["missing_runtime_files"], [])
+                    self.assertEqual(ctx.state.runtime_health_cache, {})
+                    probe.assert_not_called()
+
+    def test_linux_ldd_opt_out_disabled_values_keep_dependency_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self.make_runtime_context(tmp, "linux")
+            (ctx.paths.llama_bin / "llama-server").write_text("binary")
+            for value in ("", "0", "false", "no", "off", "invalid"):
+                ctx.state.clear_runtime_health_cache()
+                with self.subTest(value=value), mock.patch.dict(
+                    os.environ, {"LLAMA_GUI_SKIP_LDD": value}
+                ), mock.patch.object(
+                    llama_manager, "get_linux_missing_libraries", return_value=["libvulkan.so.1"]
+                ) as probe:
+                    result = llama_manager.validate_runtime_dependencies(ctx, ["llama-server"])
+                    self.assertFalse(result["ok"])
+                    self.assertEqual(result["missing_runtime_files"], ["libvulkan.so.1"])
+                    probe.assert_called_once()
+
+    def test_linux_ldd_opt_out_bypasses_cached_failure_without_replacing_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self.make_runtime_context(tmp, "linux")
+            (ctx.paths.llama_bin / "llama-server").write_text("binary")
+            with mock.patch.object(
+                llama_manager, "get_linux_missing_libraries", return_value=["libvulkan.so.1"]
+            ) as probe:
+                failed = llama_manager.validate_runtime_dependencies(ctx, ["llama-server"])
+                self.assertFalse(failed["ok"])
+                with mock.patch.dict(os.environ, {"LLAMA_GUI_SKIP_LDD": "1"}):
+                    skipped = llama_manager.validate_runtime_dependencies(ctx, ["llama-server"])
+                self.assertTrue(skipped["ok"])
+                self.assertFalse(skipped["checked"])
+                self.assertEqual(
+                    llama_manager.validate_runtime_dependencies(ctx, ["llama-server"]), failed
+                )
+                probe.assert_called_once()
+
+    def test_linux_ldd_opt_out_does_not_skip_macos_dependency_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self.make_runtime_context(tmp, "darwin")
+            (ctx.paths.llama_bin / "llama-server").write_text("binary")
+            ctx.paths.llama_custom_bin.mkdir(parents=True)
+            (ctx.paths.llama_custom_bin / "llama-server").write_text("binary")
+            with mock.patch.dict(os.environ, {"LLAMA_GUI_SKIP_LDD": "1"}), mock.patch.object(
+                llama_manager, "get_macos_rpath_libraries", return_value=["libllama.0.dylib"]
+            ) as probe:
+                results = (
+                    llama_manager.validate_runtime_dependencies(ctx, ["llama-server"]),
+                    llama_manager._validate_custom_runtime_dependencies(ctx, ["llama-server"]),
+                )
+            for result in results:
+                self.assertFalse(result["ok"])
+                self.assertTrue(result["checked"])
+                self.assertEqual(result["missing_runtime_files"], ["libllama.0.dylib"])
+            self.assertEqual(probe.call_count, 2)
 
     def test_validate_macos_custom_runtime_checks_custom_bin_only(self):
         with tempfile.TemporaryDirectory() as tmp:

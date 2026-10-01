@@ -84,7 +84,7 @@
 ### Backend Capabilities
 
 - Downloads `llama.cpp` releases from GitHub with SHA256 verification.
-- Validates packaged runtime libraries with `otool` on macOS and `ldd` on Linux before launch, while preserving the local runtime-library search path.
+- Validates packaged runtime libraries with `otool` on macOS and `ldd` on Linux before launch, while preserving the local runtime-library search path. `LLAMA_GUI_SKIP_LDD=1` opts out of Linux dependency probes for status, custom activation, preflight, and launch; skipped results report `checked: false` and `skip_reason: "LLAMA_GUI_SKIP_LDD"` and bypass the runtime-health cache. Executable and permission checks still apply.
 - Runs `llama-server`, `llama-cli`, `llama-bench`, or `llama-perplexity` as a subprocess and streams stdout/stderr.
 - Downloads the official WikiText-2 raw test file for Benchmarking clean perplexity runs.
 - Handles preset, model file, and Hugging Face download APIs.
